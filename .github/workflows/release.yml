@@ -1,0 +1,82 @@
+name: Release
+
+# Push a tag such as v1.7.7-potplayer.1 (or run it by hand) to build the
+# Windows x64 installer and portable zip and publish them as a GitHub release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows64:
+    name: Build and release for Windows (64-bit)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          architecture: x64
+
+      - name: Install Python dependencies
+        run: |
+          pip3 install -U setuptools wheel pip
+          pip3 install -r requirements.txt
+          pip3 install "PySide6-Essentials>=6.11,<6.12"
+          pip3 install "py2exe==0.14.0.0"
+
+      - name: Build
+        run: |
+          $ver = (findstr version .\syncplay\__init__.py).split("'")[1]
+          echo "VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          python buildPy2exe.py
+          New-Item -Path syncplay_v$ver -Name "syncplay.ini" -Value " "
+
+      - name: Test packaged GUI startup
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\syncplay_v${{ env.VER }}\Syncplay.exe" -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited) {
+            throw "Packaged Syncplay.exe exited during startup with code $($process.ExitCode)"
+          }
+          Stop-Process -Id $process.Id -Force
+
+      - name: Package
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $tag = "v$env:VER-potplayer.$env:GITHUB_RUN_NUMBER"
+          }
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $name = "SyncPlay-PotPlayer-$tag-x64"
+          Move-Item "Syncplay-$env:VER-Setup.exe" "$name-Setup.exe"
+          Compress-Archive -Path "syncplay_v$env:VER" -DestinationPath "$name-Portable.zip"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "SyncPlay-PotPlayer-$env:TAG-x64"
+          $notes = @"
+          Syncplay $env:VER with PotPlayer support (Windows, 64-bit).
+
+          - **$name-Setup.exe**: installer
+          - **$name-Portable.zip**: portable, unzip and run ``Syncplay.exe``
+
+          In Syncplay, set the media player to ``C:\Program Files\DAUM\PotPlayer\PotPlayerMini64.exe``.
+          For accurate seeking, turn off *Playback > Jump (to) > Use keyframe to jump to a time* in PotPlayer.
+          "@
+          gh release create $env:TAG "$name-Setup.exe" "$name-Portable.zip" `
+            --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA `
+            --title "SyncPlay-PotPlayer $env:TAG" --notes $notes
